@@ -4,7 +4,7 @@ const app     = express();
 
 app.use(express.json({ limit: '10mb' }));
 
-// CORS — allow everything
+// CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -13,7 +13,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check — Railway uses this to confirm the server is alive
+// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'CREtech proxy running' });
 });
@@ -22,7 +22,7 @@ app.get('/', (req, res) => {
 app.post('/anthropic', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: { message: 'ANTHROPIC_API_KEY environment variable not set' } });
+    return res.status(500).json({ error: { message: 'ANTHROPIC_API_KEY not set' } });
   }
   try {
     const response = await axios.post(
@@ -34,7 +34,7 @@ app.post('/anthropic', async (req, res) => {
           'x-api-key':         apiKey,
           'anthropic-version': '2023-06-01',
         },
-        timeout: 60000,
+        timeout: 120000, // 2 minutes
       }
     );
     res.json(response.data);
