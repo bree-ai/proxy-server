@@ -1,5 +1,6 @@
 const express = require('express');
 const axios   = require('axios');
+const { Pool } = require('pg');
 const app     = express();
 
 app.use(express.json({ limit: '50mb' }));
@@ -13,46 +14,99 @@ app.use((req, res, next) => {
   next();
 });
 
-// In-memory store — persists as long as server is running
-// Railway keeps the server alive so this works reliably
-let sharedAttendees = [];
-let sharedProduct   = '';
-let lastUpdated     = null;
+// Postgres connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
+    ? false
+    : { rejectUnauthorized: false }
+});
+
+// Create table on startup if it doesn't exist
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS store (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('DB ready');
+  } catch(e) {
+    console.error('DB init error:', e.message);
+  }
+}
+initDB();
+
+async function dbGet(key) {
+  const res = await pool.query('SELECT value FROM store WHERE key=$1', [key]);
+  return res.rows.length ? res.rows[0].value : null;
+}
+async function dbSet(key, value) {
+  await pool.query(`
+    INSERT INTO store(key, value, updated_at) VALUES($1, $2, NOW())
+    ON CONFLICT(key) DO UPDATE SET value=$2, updated_at=NOW()
+  `, [key, value]);
+}
 
 const ADMIN_KEY = process.env.ADMIN_KEY || 'cretech2026';
 
 // Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', attendees: sharedAttendees.length, lastUpdated });
+app.get('/', async (req, res) => {
+  try {
+    const raw = await dbGet('attendees');
+    const count = raw ? JSON.parse(raw).length : 0;
+    const updated = await dbGet('lastUpdated');
+    res.json({ status: 'ok', attendees: count, lastUpdated: updated });
+  } catch(e) {
+    res.json({ status: 'ok', error: e.message });
+  }
 });
 
-// GET attendees — any rep can call this
-app.get('/attendees', (req, res) => {
-  res.json({ attendees: sharedAttendees, product: sharedProduct, lastUpdated });
+// GET attendees — any rep, any device
+app.get('/attendees', async (req, res) => {
+  try {
+    const raw     = await dbGet('attendees');
+    const product = await dbGet('product');
+    const updated = await dbGet('lastUpdated');
+    res.json({
+      attendees:   raw ? JSON.parse(raw) : [],
+      product:     product || '',
+      lastUpdated: updated
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// POST attendees — admin only, requires X-Admin-Key header
-app.post('/attendees', (req, res) => {
-  const key = req.headers['x-admin-key'];
-  if (key !== ADMIN_KEY) {
+// POST attendees — admin only
+app.post('/attendees', async (req, res) => {
+  if (req.headers['x-admin-key'] !== ADMIN_KEY)
     return res.status(401).json({ error: 'Unauthorized' });
-  }
   const { attendees, product } = req.body;
-  if (!Array.isArray(attendees)) {
+  if (!Array.isArray(attendees))
     return res.status(400).json({ error: 'attendees must be an array' });
+  try {
+    await dbSet('attendees', JSON.stringify(attendees));
+    await dbSet('lastUpdated', new Date().toISOString());
+    if (product !== undefined) await dbSet('product', product);
+    res.json({ ok: true, count: attendees.length });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
-  sharedAttendees = attendees;
-  if (product !== undefined) sharedProduct = product;
-  lastUpdated = new Date().toISOString();
-  res.json({ ok: true, count: sharedAttendees.length, lastUpdated });
 });
 
-// POST product context — admin only
-app.post('/product', (req, res) => {
-  const key = req.headers['x-admin-key'];
-  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'Unauthorized' });
-  sharedProduct = req.body.product || '';
-  res.json({ ok: true });
+// POST product
+app.post('/product', async (req, res) => {
+  if (req.headers['x-admin-key'] !== ADMIN_KEY)
+    return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    await dbSet('product', req.body.product || '');
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // /anthropic → Anthropic API
